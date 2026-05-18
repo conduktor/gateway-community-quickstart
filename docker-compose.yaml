@@ -1,0 +1,172 @@
+# This docker-compose is only to get started with the Conduktor Passthrough Gateway.
+
+
+
+####################################################################################################
+# DO NOT USE IT IN PRODUCTION
+#
+# For production, please check: https://docs.conduktor.io/platform/category/deployment-options/
+#   to deploy on Kubernetes via Helm, or AWS using Cloudformation.
+####################################################################################################
+services:
+  
+  kafka-controller:
+    image: apache/kafka-native:3.9.0
+    hostname: kafka-controller
+    container_name: kafka-controller
+    environment:
+      KAFKA_NODE_ID: 0
+      KAFKA_PROCESS_ROLES: controller
+      KAFKA_LISTENERS: "CONTROLLER://kafka-controller:9095"
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "CONTROLLER:SASL_PLAINTEXT,DOCKER:SASL_PLAINTEXT"
+      KAFKA_INTER_BROKER_LISTENER_NAME: DOCKER
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_AUTHORIZER_CLASS_NAME: org.apache.kafka.metadata.authorizer.StandardAuthorizer
+      KAFKA_LISTENER_NAME_CONTROLLER_SASL_ENABLED_MECHANISMS: PLAIN
+      KAFKA_SASL_MECHANISM_CONTROLLER_PROTOCOL: PLAIN
+      KAFKA_LISTENER_NAME_CONTROLLER_PLAIN_SASL_JAAS_CONFIG: |
+        org.apache.kafka.common.security.plain.PlainLoginModule required \
+        username="admin" \
+        password="admin-secret" \
+        user_admin="admin-secret";
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 0@kafka-controller:9095
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_SUPER_USERS: "User:admin;User:app-a;User:app-b;User:app-c"
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 1
+      KAFKA_HEAP_OPTS: "-Xmx512M -Xms512M"
+    healthcheck:
+      test: nc -zv kafka-controller 9095 || exit 1
+      interval: 2s
+      retries: 25
+
+
+  kafka:
+    image: apache/kafka-native:3.9.0
+    hostname: kafka
+    container_name: kafka
+    environment:
+        KAFKA_PROCESS_ROLES: broker
+        KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "DOCKER:SASL_PLAINTEXT,LAPTOP:PLAINTEXT,CONTROLLER:SASL_PLAINTEXT"
+        KAFKA_INTER_BROKER_LISTENER_NAME: DOCKER
+        KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+        KAFKA_CONTROLLER_QUORUM_VOTERS: "0@kafka-controller:9095"
+        KAFKA_DEFAULT_REPLICATION_FACTOR: 1
+        KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+        KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+        KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+        KAFKA_HEAP_OPTS: "-Xmx512M -Xms512M"
+        KAFKA_AUTHORIZER_CLASS_NAME: org.apache.kafka.metadata.authorizer.StandardAuthorizer
+        KAFKA_SASL_MECHANISM_INTER_BROKER_PROTOCOL: PLAIN
+        KAFKA_SASL_MECHANISM_CONTROLLER_PROTOCOL: PLAIN
+        KAFKA_LISTENER_NAME_CONTROLLER_SASL_ENABLED_MECHANISMS: PLAIN
+        KAFKA_LISTENER_NAME_CONTROLLER_PLAIN_SASL_JAAS_CONFIG: |
+          org.apache.kafka.common.security.plain.PlainLoginModule required \
+          username="admin" \
+          password="admin-secret" \
+          user_admin="admin-secret";
+        KAFKA_LISTENER_NAME_DOCKER_SASL_ENABLED_MECHANISMS: PLAIN
+        KAFKA_LISTENER_NAME_DOCKER_PLAIN_SASL_JAAS_CONFIG:
+          org.apache.kafka.common.security.plain.PlainLoginModule required \
+          username="admin" \
+          password="admin-secret" \
+          user_admin="admin-secret" \
+          user_app-a="app-a-secret" \
+          user_app-b="app-b-secret" \
+          user_app-c="app-c-secret";
+        KAFKA_SASL_JAAS_CONFIG:
+            org.apache.kafka.common.security.plain.PlainLoginModule required \
+            username="admin" \
+            password="admin-secret";
+        KAFKA_SUPER_USERS: "User:admin;User:app-a;User:app-b;User:app-c"
+        KAFKA_NODE_ID: 1
+        KAFKA_LISTENERS: "DOCKER://kafka:9092,LAPTOP://:19092"
+        KAFKA_ADVERTISED_LISTENERS: "DOCKER://kafka:9092,LAPTOP://localhost:19092"
+    healthcheck:
+      test: nc -zv kafka 9092 || exit 1
+      interval: 5s
+      retries: 25
+    depends_on:
+      kafka-controller:
+        condition: service_healthy
+  
+
+  schema-registry:
+    image: ghcr.io/aiven-open/karapace:4.1.0
+    container_name: karapace
+    depends_on:
+      - kafka
+    ports:
+      - "8081:8081"
+    command: ["/opt/karapace/start.sh", "registry"]
+    environment:
+      KARAPACE_ADVERTISED_HOSTNAME: schema-registry
+      KARAPACE_BOOTSTRAP_URI: kafka:9092
+      KARAPACE_PORT: 8081
+      KARAPACE_HOST: 0.0.0.0
+      KARAPACE_CLIENT_ID: karapace
+      KARAPACE_GROUP_ID: karapace-registry
+      KARAPACE_MASTER_ELIGIBILITY: "true"
+      KARAPACE_TOPIC_NAME: _schemas
+      KARAPACE_COMPATIBILITY: BACKWARD
+      KARAPACE_SECURITY_PROTOCOL: SASL_PLAINTEXT
+      KARAPACE_SASL_MECHANISM: PLAIN
+      KARAPACE_SASL_PLAIN_USERNAME: admin
+      KARAPACE_SASL_PLAIN_PASSWORD: admin-secret
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8081/_health').status==200 else 1)\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+
+  conduktor-data-generator:
+    image: conduktor/conduktor-data-generator:0.10.0
+    container_name: conduktor-data-generator
+    environment:
+      KAFKA_SCHEMA_REGISTRY_URL: http://karapace:8081
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      KAFKA_SECURITY_PROTOCOL: SASL_PLAINTEXT
+      KAFKA_SASL_MECHANISM: PLAIN
+      KAFKA_SASL_JAAS_CONFIG: 'org.apache.kafka.common.security.plain.PlainLoginModule required username="admin" password="admin-secret";'
+    restart: "no"
+    depends_on:
+      kafka:
+        condition: service_healthy
+      schema-registry:
+        condition: service_healthy
+
+
+  conduktor-passthrough-gateway:
+    image: conduktor/conduktor-gateway:3.19.1
+    hostname: conduktor-passthrough-gateway
+    container_name: conduktor-passthrough-gateway
+    ports:
+      - 6969:6969
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      KAFKA_SECURITY_PROTOCOL: SASL_PLAINTEXT
+      KAFKA_SASL_MECHANISM: PLAIN
+      KAFKA_SASL_JAAS_CONFIG: org.apache.kafka.common.security.plain.PlainLoginModule required username="admin" password="admin-secret";
+      GATEWAY_SECURITY_PROTOCOL: SASL_PLAINTEXT
+      GATEWAY_SECURITY_MODE: KAFKA_MANAGED
+      GATEWAY_ADVERTISED_HOST: localhost
+      GATEWAY_FEATURE_FLAGS_AUDIT: false
+      GATEWAY_TOPIC_STORE_KCACHE_REPLICATION_FACTOR: 1
+      GATEWAY_DATA_QUALITY_TOPIC_REPLICATION_FACTOR: 1
+      GATEWAY_LICENSE_KEY: <INSERT_LICENSE_KEY_HERE>
+      GATEWAY_CLUSTER_ID: conduktor-passthrough-gateway
+      GATEWAY_MIN_BROKERID: 1
+      LOG4J2_IO_CONDUKTOR_PROXY_REBUILDER_COMPONENTS_LEVEL: debug
+
+    healthcheck:
+      test: curl --fail --silent http://localhost:8888/health/ready --output /dev/null || exit 1
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    depends_on:
+      kafka:
+        condition: service_healthy
+
+
