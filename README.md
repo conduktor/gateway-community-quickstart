@@ -12,26 +12,28 @@ Only the Gateway is exposed to your laptop, as Kafka itself stays unreachable. C
 
 ## You'll need a license
 
-The Passthrough Gateway is free but requires a license key. [Request one here](https://conduktor.io/gateway/passthrough#request-license). 
+The Passthrough Gateway is free but requires a license key. [Request one here](https://conduktor.io/gateway/passthrough#request-license).
 
 After filling out your details, you should expect your license by email within 1 business day.
 
-In `docker-compose.yaml`, replace `<INSERT_LICENSE_KEY_HERE>` with the key from your email:
-
-```yaml
-      GATEWAY_TOPIC_STORE_KCACHE_REPLICATION_FACTOR: 1
-      GATEWAY_DATA_QUALITY_TOPIC_REPLICATION_FACTOR: 1
-      GATEWAY_LICENSE_KEY: <INSERT_LICENSE_KEY_HERE>
-      GATEWAY_CLUSTER_ID: conduktor-passthrough-gateway
-      GATEWAY_MIN_BROKERID: 1
-```
-
 ## Quickstart
+
+Clone the repo:
 
 ```bash
 git clone https://github.com/conduktor/ptg-quickstart.git
 cd ptg-quickstart
-# paste your license into docker-compose.yaml first (see above)
+```
+
+Drop your license into a `.env` file:
+
+```bash
+echo "GATEWAY_LICENSE_KEY=<paste-key-from-email>" > .env
+```
+
+Start the stack:
+
+```bash
 docker compose up -d
 ```
 
