@@ -21,8 +21,8 @@ After filling out your details, you should expect your license by email within 1
 Clone the repo:
 
 ```bash
-git clone https://github.com/conduktor/ptg-quickstart.git
-cd ptg-quickstart
+git clone https://github.com/conduktor/passthrough-gateway-quickstart.git
+cd passthrough-gateway-quickstart
 ```
 
 Drop your license into a `.env` file:
