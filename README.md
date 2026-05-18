@@ -112,4 +112,5 @@ This compose is wired for a local demo. If you're interested in running the Gate
 ## Learn more
 
 - [Passthrough Gateway product page](https://conduktor.io/gateway/passthrough)
+- [Read the official gateway docs](https://docs.conduktor.io/guide/conduktor-in-production/manage-licenses/passthrough-gateway)
 - [Conduktor Slack community](https://conduktor.io/slack)
