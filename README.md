@@ -1,116 +1,127 @@
-# Conduktor Passthrough Gateway — Quickstart
+# Conduktor Gateway Community Edition Quickstart
 
-A local demo of the [Conduktor Passthrough Gateway](https://conduktor.io/gateway/passthrough). It spins up a private Kafka cluster, Karapace (Schema Registry), a [data generator](https://hub.docker.com/r/conduktor/conduktor-data-generator), and the [base Gateway image](https://hub.docker.com/r/conduktor/conduktor-gateway). 
+Conduktor Gateway Community Edition is a **free Kafka proxy that connects clients to clusters sitting in other VPCs, clouds, or private networks, with no changes to your brokers or credentials.** For free, it runs in passthrough mode, where it translates the broker addresses Kafka advertises into ones the client can reach, and it leaves authentication to the cluster.
 
-Only the Gateway is exposed to your laptop, as Kafka itself stays unreachable. Clients connect through the Gateway using their existing SASL credentials, and the Gateway translates broker addresses on the way back so clients always see an address they can route to.
+This quickstart recreates that situation on your laptop: a Kafka cluster the clients **can't reach directly**, and a Gateway that proxies those clients to the cluster.
 
-## Prerequisites
+## What it's for
 
-- Docker and Docker Compose
-- Kafka CLI tools on your local machine
-- A Passthrough Gateway license (free, see below).
+- **Reach Kafka without adding peerings.** Route many client VPCs through one proxy in an already-peered VPC. The cluster keeps one attachment, however many client networks connect.
+- **Reach a private cluster from outside.** When the cluster has no public endpoint, a proxy on the boundary lets external clients, partners, or cross-cloud workloads in, with no cluster changes.
+- **Single egress point.** Many internal clients funnel through one proxy to a remote cluster: one firewall rule, one TLS termination, one audit trail.
 
-## You'll need a license
+## What's included
 
-The Passthrough Gateway is free but requires a license key. [Request one here](https://conduktor.io/gateway/passthrough#request-license).
+Starting the quickstart runs six containers:
 
-After filling out your details, you should expect your license by email within 1 business day.
+- **kafka**: a single-node Kafka cluster (the private cluster).
+- **karapace**: Schema Registry, holding the Avro schemas.
+- **conduktor-data-generator**: produces sample Avro data (`customers`, `products`, `purchases`, and so on).
+- **conduktor-gateway**: the proxy.
+- **kafka-consumer-a** and **kafka-consumer-b**: two consumers, in two separate networks, reading through the Gateway as different principals.
 
-## Quickstart
+## How it works
 
-Clone the repo:
+The containers are placed in **three isolated Docker networks** that stand in for separate VPCs. A container can only reach another container on a network it shares.
+
+```
+          cluster-vpc  (private; no port published to your laptop)
+        +-----------------------------------+
+        |  kafka          data-generator    |
+        +-----------------+-----------------+
+                          |  only the Gateway can reach Kafka
+        +-----------------+-----------------+
+        |         conduktor-gateway         |  (a member of all three networks)
+        +------+--------------------+-------+
+               |                    |
+        client-vpc-a          client-vpc-b
+        +------------------+  +------------------+
+        | kafka-consumer-a |  | kafka-consumer-b |
+        +------------------+  +------------------+
+        consumers can't reach Kafka directly: different networks, no route
+```
+
+- **kafka** is only in `cluster-vpc`, so it's unreachable from the client networks and from your laptop.
+- **kafka-consumer-a** is only in `client-vpc-a`; **kafka-consumer-b** is only in `client-vpc-b`. Neither shares a network with the cluster, so neither can route to `kafka`.
+- **conduktor-gateway** is the only container joined to all three networks, so it's the only path from a consumer to the cluster.
+- **karapace** (the Schema Registry, not shown above) is attached to all three networks, so the consumers can fetch schemas to decode Avro. Kafka stays reachable only through the Gateway; the registry is reachable directly, as it commonly is in real setups.
+
+When a client connects through the Gateway, the Gateway opens its own connection to the broker and rewrites the address the broker advertises (`kafka:9092`, which the client can't reach) into its own address (which the client can). The cluster and the client credentials are never changed.
+
+## Before you start
+
+- Docker and Docker Compose.
+- A Gateway Community Edition license, free. [Request one here](https://conduktor.io/gateway/community-edition#request-license).
+
+You don't need Kafka installed locally; the consumer containers bundle `kcat`. The one-liner needs `git` (it clones the repo); the manual path doesn't.
+
+## Get started
 
 ```bash
-git clone https://github.com/conduktor/passthrough-gateway-quickstart.git
-cd passthrough-gateway-quickstart
+bash <(curl -fsSL https://releases.conduktor.io/gateway-community-quickstart)
 ```
 
-Drop your license into a `.env` file:
+It downloads and runs `start.sh`, which clones the repo into `./gateway-community-quickstart`, asks for your license, and points you to the checks in [See it work](#see-it-work) below.
+
+Prefer to do it by hand? Download [`docker-compose.yaml`](https://github.com/conduktor/gateway-community-quickstart/blob/main/docker-compose.yaml), put your license in a `.env` file beside it (`GATEWAY_LICENSE_KEY=<your-key>`), and run `docker compose up`. To read the script before running it: `curl -fsSL https://releases.conduktor.io/gateway-community-quickstart -o start.sh && less start.sh`.
+
+Stop with `docker compose down` or `./stop.sh` from that folder.
+
+## See it work
+
+First bring the stack up (the one-liner above, or `./start.sh`). Then, from the `gateway-community-quickstart` folder, run the guided walkthrough, which runs each check and explains it. `start.sh` also offers to run it for you when it finishes.
 
 ```bash
-echo "GATEWAY_LICENSE_KEY=<paste-key-from-email>" > .env
+./demo.sh
 ```
 
-Start the stack:
+Or run the steps by hand. Each uses `docker exec` into a consumer, so you don't need Kafka on your laptop.
+
+**1. Confirm a consumer can't reach Kafka directly.**
 
 ```bash
-docker compose up -d
+docker exec kafka-consumer-a kcat -b kafka:9092 -L -m 5
+# -> Failed to resolve 'kafka:9092'
 ```
 
-Wait ~30 seconds, then check everything's up:
+`kafka` is in a different network, so the name doesn't resolve. There's no route from the consumer to the cluster.
+
+**2. Read the data through the Gateway (Avro decoded via Karapace).**
 
 ```bash
-docker compose ps
+docker exec kafka-consumer-a kcat -b conduktor-gateway:9092 -t customers -C -e -c 3 \
+  -s value=avro -r http://karapace:8081 \
+  -X security.protocol=SASL_PLAINTEXT -X sasl.mechanism=PLAIN \
+  -X sasl.username=consumer-a -X sasl.password=consumer-a-secret
+# -> readable JSON records
 ```
 
-## What's running
+Reached only through the Gateway. `kafka-consumer-b`, in its own VPC and as a different principal (`consumer-b`), does exactly the same.
 
-| Component | Purpose | Exposed |
-|---|---|---|
-| Conduktor Passthrough Gateway | The proxy. Only public entry point. | `localhost:6969` |
-| Kafka broker (KRaft) | Private cluster. | Internal only |
-| Kafka controller | Cluster metadata. | Internal only |
-| Karapace | Schema Registry. | `localhost:8081` |
-| Conduktor Data Generator | Produces test data. | Internal only |
-
-## Demo credentials
-
-The stack uses hardcoded SASL credentials (`admin` / `admin-secret`, plus a few app users). These are intentional for a local demo so you can run commands without any setup. They are not safe for production. Replace them with real secrets before running this anywhere outside your laptop.
-
-## Verify it works
-
-Run these from your laptop. Each one talks to Kafka through the Gateway on `localhost:6969`.
+**3. See the address translation that makes it work.**
 
 ```bash
-# 1. List topics. Confirms that Kafka is reachable via Gateway's exposed port.
-kafka-topics --list --bootstrap-server localhost:6969 --command-config kafka-admin.properties
-
-# 2. Check the schemas registered in Karapace.
-curl -s http://localhost:8081/subjects
-
-# 3. Consume messages. The output is Avro-encoded, so it looks like binary noise. See below for decoded output.
-kafka-console-consumer --bootstrap-server localhost:6969 --topic customers --from-beginning --consumer.config kafka-admin.properties
+docker logs conduktor-gateway 2>&1 | grep "Rewriting METADATA"
+# kafka:9092 -> conduktor-gateway:9092
 ```
 
-### Decoded output
+The broker advertises `kafka:9092`. The Gateway rewrites that to its own address before the consumer ever sees it, so the consumer always gets an address it can reach.
 
-To see readable JSON instead of Avro bytes, use the tool of your choice: [`kcat`](https://github.com/edenhill/kcat), Confluent's `kafka-avro-console-consumer`, or a Kafka UI like [Conduktor Console](https://conduktor.io/get-started). Example with `kcat`:
+## In a real deployment
 
-```bash
-kcat -b localhost:6969 -t customers -C -e -s value=avro -r http://localhost:8081 -Xsecurity.protocol=SASL_PLAINTEXT -Xsasl.mechanism=PLAIN -Xsasl.username=admin -Xsasl.password=admin-secret
-```
+The Gateway sits in its own hub VPC, peered (or connected via PrivateLink) to the cluster VPC and to each client VPC. The peerings land on the hub, never directly between a client and the cluster, so the cluster keeps one attachment. Docker has no peering, so this quickstart achieves the same isolation by making the Gateway a member of each network.
 
-### See the address translation in action
+**Why not just add a second broker listener instead of a proxy?** In most managed Kafka services (Confluent Cloud, Aiven) you can't add a listener at all or it's too cumbersome to do so out of the box. And even where you can, every broker's advertised address still has to be routable from the client's network, which means an endpoint per broker. The Gateway is one entry point that translates addresses and routes to the brokers behind it.
 
-The Gateway is set up with debug logging on its address-rewriting component. Every time a client asks Kafka for broker addresses, the Gateway rewrites them on the way back so the client gets an address it can actually reach.
+## Good to know
 
-You can watch this happen live. In one terminal, follow the rewrite logs (Ctrl+C to stop):
-
-```bash
-docker logs -f conduktor-passthrough-gateway 2>&1 | grep "Rewriting METADATA" | sed 's/, MetadataResponseData.*$//'
-```
-
-In another terminal, trigger a metadata call:
-
-```bash
-kafka-topics --list --bootstrap-server localhost:6969 --command-config kafka-admin.properties
-```
-
-Lines like this will show up in the first terminal:
-
-```
-Rewriting METADATA: kafka:9092 (rack: null) -> localhost:6969 (rack: null)
-```
-
-That is the Gateway telling you what it just did. Kafka's real broker address inside Docker is `kafka:9092`. Your client gets back `localhost:6969`, which is the address it can route to. Same broker, two different addresses depending on where you connect from.
-
-
-## From demo to production
-
-This compose is wired for a local demo. If you're interested in running the Gateway on Kubernetes, AWS, or other production setups, see the [deployment options](https://docs.conduktor.io/platform/category/deployment-options/) and the [Gateway deployment guide](https://docs.conduktor.io/guide/conduktor-in-production/deploy-artifacts/deploy-gateway) for security configuration, multi-broker setup, and more.
+- Credentials (`admin` / `admin-secret` for the infrastructure, plus `consumer-a` and `consumer-b`) are hardcoded for a local demo. Replace them before using this anywhere else.
+- Karapace is attached to the client VPCs so the consumers can decode Avro, which means the registry is reachable from clients even though Kafka isn't. In production you'd front the registry with a Schema Registry proxy.
+- The consumers run on the `kcat` image (published for amd64 only). That's fine on Intel/AMD natively and on Apple Silicon via Docker Desktop's emulation; the `platform: linux/amd64` pin just silences the arch warning. The only setup that won't run it is a bare arm64 Linux host without QEMU configured.
+- For real deployments (multi-broker, TLS, Kubernetes, AWS), see the [deployment options](https://docs.conduktor.io/platform/category/deployment-options/) and [Configure multiple listeners](https://docs.conduktor.io/guide/conduktor-in-production/deploy-artifacts/deploy-gateway/multiple-listeners).
 
 ## Learn more
 
-- [Passthrough Gateway product page](https://conduktor.io/gateway/passthrough)
-- [Read the official gateway docs](https://docs.conduktor.io/guide/conduktor-in-production/manage-licenses/passthrough-gateway)
+- [Product page](https://conduktor.io/gateway/community-edition)
+- [Official docs](https://docs.conduktor.io/guide/conduktor-in-production/manage-licenses/gateway-community-edition)
 - [Conduktor Slack community](https://conduktor.io/slack)
