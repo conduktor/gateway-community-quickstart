@@ -5,8 +5,8 @@
 #
 set -euo pipefail
 
-# Clean up the temp log on exit (including Ctrl+C); harmless if it was never created.
-trap 'rm -f "${UP_LOG:-}" 2>/dev/null || true' EXIT
+# Clean up the temp logs on exit (including Ctrl+C); harmless if never created.
+trap 'rm -f "${UP_LOG:-}" "${PULL_LOG:-}" "${PULL_LOG:-}.code" 2>/dev/null || true' EXIT
 
 REPO_URL="https://github.com/conduktor/gateway-community-quickstart.git"
 REPO_DIR="gateway-community-quickstart"
@@ -25,15 +25,52 @@ ok()   { printf "${GREEN}  ✓ %s${RESET}\n" "$1"; }
 info() { printf "${DIM}  %s${RESET}\n" "$1"; }
 die()  { printf "${RED}  ✗ %s${RESET}\n" "$1" >&2; exit 1; }
 
+BAR_WIDTH=28
+draw_bar() { # $1 = score, $2 = max, $3 = label
+  local score=$1 max=$2 label=$3 filled i pct
+  filled=$(( score * BAR_WIDTH / max ))
+  pct=$(( score * 100 / max ))
+  printf "\r  ["
+  for (( i = 0; i < BAR_WIDTH; i++ )); do
+    if [ "$i" -lt "$filled" ]; then printf "█"; else printf "░"; fi
+  done
+  printf "] %3d%%  %-20s\033[K" "$pct" "$label"
+}
+
+# Decode a base64url segment (JWT-style: '-_' alphabet, no padding) to stdout.
+b64url_decode() {
+  local data="${1//-/+}"; data="${data//_//}"
+  case $(( ${#data} % 4 )) in 2) data="${data}==";; 3) data="${data}=";; esac
+  printf '%s' "$data" | base64 -d 2>/dev/null
+}
+
+# Cheap, offline sanity check that a string is a plausible, unexpired license JWT.
+# This does NOT verify the signature — only the Gateway can do that. It just
+# rejects obvious garbage up front instead of waiting for the healthcheck to fail.
+validate_license() {
+  local key="$1" payload exp now
+  # A JWT is three non-empty base64url segments separated by dots.
+  if ! printf '%s' "$key" | grep -Eq '^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$'; then
+    die "That doesn't look like a valid license key (expected a JWT). Request a free one at https://conduktor.io/gateway/community-edition"
+  fi
+  # Best-effort expiry check: decode the payload (2nd segment) and read 'exp'.
+  payload="$(b64url_decode "$(printf '%s' "$key" | cut -d. -f2)")"
+  exp="$(printf '%s' "$payload" | grep -oE '"exp"[[:space:]]*:[[:space:]]*[0-9]+' | grep -oE '[0-9]+' | head -1 || true)"
+  if [ -n "$exp" ]; then
+    now="$(date +%s)"
+    [ "$exp" -gt "$now" ] || die "This license key has expired. Request a fresh one at https://conduktor.io/gateway/community-edition"
+  fi
+}
+
 # --- 1. prerequisites --------------------------------------------------------
-step "1/4 Checking prerequisites"
+step "1/5 Checking prerequisites"
 command -v docker >/dev/null 2>&1 || die "Docker is required. Install it: https://docs.docker.com/get-docker/"
 docker compose version >/dev/null 2>&1 || die "Docker Compose v2 is required (the 'docker compose' command)."
 docker info >/dev/null 2>&1 || die "Docker is installed but not running. Start Docker and re-run."
 ok "Docker and Docker Compose are ready"
 
 # --- 2. locate or fetch the stack -------------------------------------------
-step "2/4 Getting the stack"
+step "2/5 Getting the stack"
 if [ -f docker-compose.yaml ] || [ -f docker-compose.yml ]; then
   ok "Using the compose file in $(pwd)"
 elif command -v git >/dev/null 2>&1; then
@@ -51,7 +88,7 @@ else
 fi
 
 # --- 3. license --------------------------------------------------------------
-step "3/4 Setting up your license"
+step "3/5 Setting up your license"
 if [ -f .env ] && grep -q '^GATEWAY_LICENSE_KEY=.\+' .env; then
   ok "Reusing the license already in .env"
 else
@@ -64,12 +101,60 @@ else
     fi
   fi
   [ -n "${GATEWAY_LICENSE_KEY:-}" ] || die "License key was empty."
+  validate_license "$GATEWAY_LICENSE_KEY"
   printf 'GATEWAY_LICENSE_KEY=%s\n' "$GATEWAY_LICENSE_KEY" >> .env
   ok "License saved to .env"
 fi
 
-# --- 4. start ----------------------------------------------------------------
-step "4/4 Starting Kafka, the Gateway, and the consumers"
+# --- 4. download images ------------------------------------------------------
+# Pull up front so the slow first-run download is visible. 'docker compose up'
+# does this silently (and we redirect its output below to draw our own bar), so
+# without this step the start phase would sit at 0% for minutes and look hung.
+#
+# We do NOT let Docker draw the progress itself: its TTY renderer reserves a tall
+# multi-line region (one line per service + layer) and, on completion, leaves a
+# big blank gap or overflows the pane -- especially in a narrow/split terminal.
+# Instead we run the pull in the background with its output redirected to a log,
+# and drive the same single-line bar used by the start phase, which we fully
+# control. A spinner in the label keeps it visibly alive while a large layer
+# downloads (the bar itself advances once per service that finishes).
+step "4/5 Downloading images"
+info "(first run downloads a few GB; cached images are skipped)"
+
+TOTAL_SVC=$(docker compose config --services 2>/dev/null | grep -c . || true)
+[ "${TOTAL_SVC:-0}" -gt 0 ] 2>/dev/null || TOTAL_SVC=1
+
+PULL_LOG="$(mktemp)"
+# Run in a subshell that records the exit code on completion. We poll for that
+# sentinel rather than 'kill -0', which can stay true for an unreaped zombie.
+( docker compose pull >"$PULL_LOG" 2>&1; echo $? >"$PULL_LOG.code" ) &
+
+if [ -z "$IS_TTY" ]; then echo "  Pulling images for $TOTAL_SVC services..."; fi
+SPIN='|/-\'; spin_i=0
+while [ ! -f "$PULL_LOG.code" ]; do
+  if [ -n "$IS_TTY" ]; then
+    # A service is done once Compose prints "Pulled" / "Skipped" / "Error" for it.
+    done_n=$(grep -cE ' (Pulled|Skipped|Error)' "$PULL_LOG" 2>/dev/null || true); done_n=${done_n:-0}
+    [ "$done_n" -gt "$TOTAL_SVC" ] && done_n=$TOTAL_SVC
+    # '|| true': before any service starts, grep matches nothing and, under
+    # 'set -o pipefail', a failing command substitution would abort the script.
+    cur=$(grep -E ' Pulling *$' "$PULL_LOG" 2>/dev/null | tail -1 | awk '{print $1}' || true)
+    frame=${SPIN:spin_i:1}; spin_i=$(( (spin_i + 1) % 4 ))
+    draw_bar "$done_n" "$TOTAL_SVC" "$frame downloading ${cur:-}"
+  fi
+  sleep 0.2
+done
+
+if [ "$(cat "$PULL_LOG.code" 2>/dev/null)" != 0 ]; then
+  [ -n "$IS_TTY" ] && printf "\n"
+  tail -n 15 "$PULL_LOG" >&2
+  die "Failed to download images (see above). Check your network, then re-run. Clean up with 'docker compose down'."
+fi
+if [ -n "$IS_TTY" ]; then draw_bar "$TOTAL_SVC" "$TOTAL_SVC" "done"; printf "\n"; fi
+ok "All images present"
+
+# --- 5. start ----------------------------------------------------------------
+step "5/5 Starting Kafka, the Gateway, and the consumers"
 
 # Run 'up' in the background so we can draw a live progress bar while it works.
 # (It would otherwise block until everything is healthy, because the consumers
@@ -82,18 +167,6 @@ UP_PID=$!
 # so the bar grows as the stack comes up (started -> healthy) rather than faking it.
 CORE_SERVICES=(kafka karapace "$GATEWAY_CONTAINER")
 MAX_SCORE=$(( ${#CORE_SERVICES[@]} * 2 ))
-BAR_WIDTH=28
-
-draw_bar() { # $1 = score, $2 = max, $3 = label
-  local score=$1 max=$2 label=$3 filled i pct
-  filled=$(( score * BAR_WIDTH / max ))
-  pct=$(( score * 100 / max ))
-  printf "\r  ["
-  for (( i = 0; i < BAR_WIDTH; i++ )); do
-    if [ "$i" -lt "$filled" ]; then printf "█"; else printf "░"; fi
-  done
-  printf "] %3d%%  %-20s" "$pct" "$label"
-}
 
 gw=""
 if [ -z "$IS_TTY" ]; then echo "  Waiting for the Gateway to become healthy..."; fi
