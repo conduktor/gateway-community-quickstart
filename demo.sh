@@ -52,4 +52,4 @@ printf "${DIM}   -> Two isolated VPCs, one Gateway, one attachment to the cluste
 step "4) See what the Gateway rewrote: the private kafka:9092 becomes an address the client can reach." \
   "docker logs $GW 2>&1 | grep 'Rewriting METADATA' | sed 's/, MetadataResponseData.*//' | tail -3"
 
-printf "\n${GREEN}${BOLD}That's the demo.${RESET} Stop everything with: docker compose down (or ./stop.sh)\n"
+printf "\n${GREEN}${BOLD}That's the gist of Gateway in passthrough mode!${RESET} Stop everything with: docker compose down (or ./stop.sh). If you'd like to learn more, check out the docs at https://docs.conduktor.io/guide/conduktor-in-production/manage-licenses/gateway-community-edition\n"
