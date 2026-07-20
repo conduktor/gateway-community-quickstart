@@ -18,13 +18,38 @@ mode you're in.
 ## Quickest way: see it as a user
 
 ```bash
-./mock-license-api/demo.sh
+./mock-license-api/demo.sh              # online: type an email, get a license
+OFFLINE=1 ./mock-license-api/demo.sh    # air-gap: probe fails -> form + paste fallback
+KEEP=1    ./mock-license-api/demo.sh    # persistent: shows re-run behaviors (below)
 ```
 
-Starts the mock, then runs the install script in a fresh temp dir (so there's no existing
-`.env` to reuse) and drops you straight into the prompt. Type a business email to get a
-license, or a personal one (`@gmail.com`) to see the rejection. Stops the mock and cleans
-up when you exit. This is the whole user experience in one command.
+The default run starts the mock, then runs the install script in a fresh temp dir (so
+there's no existing `.env` to reuse) and drops you straight into the prompt. Type a
+business email to get a license, or a personal one (`@gmail.com`) to see the rejection.
+Stops the mock and cleans up when you exit. This is the whole user experience in one
+command.
+
+**`OFFLINE=1`** simulates an air-gapped / blocked network by pointing the script at a
+dead port. Note that turning off your Wi-Fi does NOT do this: the mock lives on
+`127.0.0.1`, and localhost stays reachable with no internet, so the probe correctly
+succeeds. In production the endpoint is a real internet host, so no connectivity means
+the probe fails and the script falls back to the manual form + paste flow, which is what
+this mode shows.
+
+**`KEEP=1`** stores demo state in `/tmp/gateway-ce-demo` instead of a throwaway dir, so
+you can see the behaviors that only show up across runs:
+
+```bash
+KEEP=1 ./mock-license-api/demo.sh    # run 1: provisions, saves .env
+KEEP=1 ./mock-license-api/demo.sh    # run 2: reuses the saved license, ZERO API calls
+rm /tmp/gateway-ce-demo/.env
+KEEP=1 ./mock-license-api/demo.sh    # run 3: same email -> mock logs "returning
+                                     #        EXISTING", the SAME key comes back
+rm -rf /tmp/gateway-ce-demo          # reset
+```
+
+Run 3 is the "one active license per user" rule from the spec (§3): losing or deleting
+your `.env` never mints a duplicate; the POST is the lookup.
 
 The sections below are for driving the pieces manually.
 

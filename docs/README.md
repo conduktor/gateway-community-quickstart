@@ -20,10 +20,13 @@ From the repo root:
 ```bash
 ./mock-license-api/demo.sh              # online: type an email, get a license
 OFFLINE=1 ./mock-license-api/demo.sh    # air-gap: probe fails, manual form + paste fallback
+KEEP=1    ./mock-license-api/demo.sh    # persistent state: shows reuse + same-key-back across runs
 ```
 
-Both run the real `start.sh` in a throwaway temp dir (your repo `.env` is never touched)
-and stop right after the license step (no Docker needed).
+All run the real `start.sh` outside the repo (your repo `.env` is never touched) and stop
+right after the license step (no Docker needed). The default and `OFFLINE` runs use a
+throwaway temp dir; `KEEP=1` persists state in `/tmp/gateway-ce-demo` so re-run behaviors
+are visible (reset with `rm -rf /tmp/gateway-ce-demo`).
 
 What to try in the online demo, mapped to the spec:
 
@@ -33,8 +36,8 @@ What to try in the online demo, mapped to the spec:
 | Enter `you@gmail.com` | "Please use a valid business email" and a re-prompt (§1 `403`) |
 | Enter `nope` | "That email looks invalid" and a re-prompt (§1 `400`) |
 | Fail 3 times | Script stops asking and points to the form (§2 attempt cap, Path B) |
-| Re-run after success | Reuses `.env`, no API call (§5 flow) |
-| Delete `.env`, same email | The **same** key comes back, not a new one (§3 one active license per user) |
+| Re-run after success (`KEEP=1` runs) | Reuses `.env`, no API call (§5 flow) |
+| Delete `.env`, same email (`KEEP=1` runs) | The **same** key comes back, not a new one (§3 one active license per user) |
 | Watch the mock's log | `issued NEW` / `returning EXISTING` / rejections, which never reach the CRM (§2) |
 
 The `OFFLINE=1` demo shows the fallback branch: the script probes the endpoint, cannot
