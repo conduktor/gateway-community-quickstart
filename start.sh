@@ -12,6 +12,17 @@ REPO_URL="https://github.com/conduktor/gateway-community-quickstart.git"
 REPO_DIR="gateway-community-quickstart"
 GATEWAY_CONTAINER="conduktor-gateway"
 
+# --- self-serve license config ----------------------------------------------
+# When LICENSE_API_URL is set, the script tries to fetch a license automatically
+# (email -> license). When it's empty OR the endpoint is unreachable (offline / blocked
+# network / air-gap), the script falls back to the manual "request on the website and
+# paste" flow -- today's behavior. This is why the script is safe to ship BEFORE the
+# endpoint exists: with LICENSE_API_URL unset, it behaves exactly as it does today.
+LICENSE_API_URL="${LICENSE_API_URL:-}"
+LICENSE_FORM_URL="${LICENSE_FORM_URL:-https://conduktor.io/gateway/community-edition}"
+PROBE_TIMEOUT="${PROBE_TIMEOUT:-3}"     # seconds to wait when probing the endpoint
+POST_TIMEOUT="${POST_TIMEOUT:-15}"      # seconds to wait for the license response
+
 # --- pretty output -----------------------------------------------------------
 if [ -t 1 ]; then
   IS_TTY=1
@@ -62,6 +73,151 @@ validate_license() {
   fi
 }
 
+# --- self-serve provisioning helpers ----------------------------------------
+
+# True (0) if the string is shaped like a JWT (three base64url segments).
+license_is_jwt() { printf '%s' "$1" | grep -Eq '^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$'; }
+
+# True (0) if the JWT carries an 'exp' claim that is already in the past.
+license_expired() {
+  local exp payload
+  payload="$(b64url_decode "$(printf '%s' "$1" | cut -d. -f2)")"
+  exp="$(printf '%s' "$payload" | grep -oE '"exp"[[:space:]]*:[[:space:]]*[0-9]+' | grep -oE '[0-9]+' | head -1 || true)"
+  [ -n "$exp" ] && [ "$exp" -le "$(date +%s)" ]
+}
+
+# Pull a top-level string field out of a small JSON blob (no jq dependency).
+json_str() { printf '%s' "$1" | grep -oE "\"$2\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" | head -1 | sed -E 's/.*:[[:space:]]*"([^"]*)"/\1/' || true; }
+
+# True (0) if LICENSE_API_URL answers at all (any HTTP status). A connection failure or
+# timeout yields "000" -> treated as unreachable (offline / blocked / air-gapped).
+endpoint_reachable() {
+  [ -n "$LICENSE_API_URL" ] || return 1
+  local code
+  # On a connection failure/timeout curl prints "000" via -w (and exits non-zero); '|| true'
+  # keeps that value instead of appending a second one. Empty or "000" => unreachable.
+  code="$(curl -sS -m "$PROBE_TIMEOUT" -o /dev/null -w '%{http_code}' "$LICENSE_API_URL" 2>/dev/null || true)"
+  [ -n "$code" ] && [ "$code" != "000" ]
+}
+
+# POST {email} to the endpoint. Sets PROV_CODE (HTTP status) and PROV_BODY (response).
+PROV_CODE=""; PROV_BODY=""
+provision_request() {
+  local tmp; tmp="$(mktemp)"
+  PROV_CODE="$(curl -sS -m "$POST_TIMEOUT" -o "$tmp" -w '%{http_code}' \
+    -H 'Content-Type: application/json' \
+    -X POST "$LICENSE_API_URL" \
+    -d "{\"email\":\"$1\",\"source\":\"gateway-ce-quickstart\"}" 2>/dev/null || true)"
+  PROV_CODE="${PROV_CODE:-000}"
+  PROV_BODY="$(cat "$tmp" 2>/dev/null || true)"; rm -f "$tmp"
+}
+
+# Interactive self-serve: ask for an email (up to 3 tries), POST it, react to the status.
+# Echoes the license key on stdout on success; empty on give-up (caller then falls back).
+# All user-facing text goes to stderr so stdout carries only the key.
+self_serve() {
+  local email lic tries=0
+  while [ "$tries" -lt 3 ]; do
+    tries=$(( tries + 1 ))
+    printf "  Enter your business email to get a free license (attempt %d/3): " "$tries" >&2
+    read -r email || return 0
+    [ -n "$email" ] || { printf "  (email was empty)\n" >&2; continue; }
+    provision_request "$email"
+    case "$PROV_CODE" in
+      200)
+        lic="$(json_str "$PROV_BODY" license)"
+        if [ -n "$lic" ]; then printf '%s' "$lic"; return 0; fi
+        printf "  Unexpected response from the license service.\n" >&2 ;;
+      400)
+        printf "  That email looks invalid. Please try again.\n" >&2 ;;
+      403)
+        printf "  Please use a valid business email (personal domains aren't accepted).\n" >&2
+        printf "  If you think this is a mistake, request one manually at %s\n" "$LICENSE_FORM_URL" >&2 ;;
+      429)
+        printf "  The license service is rate-limiting requests right now.\n" >&2
+        return 0 ;;   # give up to the manual fallback
+      *)
+        printf "  License service error (HTTP %s). Falling back to manual.\n" "${PROV_CODE:-?}" >&2
+        return 0 ;;
+    esac
+  done
+  printf "  Couldn't provision after 3 attempts.\n" >&2
+  return 0
+}
+
+# Manual fallback (today's flow): use GATEWAY_LICENSE_EMAIL-less env key, or prompt to
+# paste a key requested from the website. Echoes the key on stdout (empty if none).
+manual_paste() {
+  if [ -t 0 ]; then
+    printf "  Request a free key at %s\n" "$LICENSE_FORM_URL" >&2
+    printf "  then paste it here: " >&2
+    local k; read -r k || true; printf '%s' "$k"
+  fi
+}
+
+# Orchestrates the whole license step: reuse -> self-serve (if online) -> manual paste.
+# On success, writes GATEWAY_LICENSE_KEY to .env and sets it in the environment.
+setup_license() {
+  # 1. Reuse a key already provided (env var or .env) IF it's valid and not expired.
+  local existing="" key=""
+  if [ -n "${GATEWAY_LICENSE_KEY:-}" ]; then
+    existing="$GATEWAY_LICENSE_KEY"
+  elif [ -f .env ]; then
+    existing="$(grep -E '^GATEWAY_LICENSE_KEY=.+' .env 2>/dev/null | head -1 | cut -d= -f2- || true)"
+  fi
+  if [ -n "$existing" ] && license_is_jwt "$existing"; then
+    if license_expired "$existing"; then
+      info "The stored license has expired -- provisioning a fresh one."
+    else
+      GATEWAY_LICENSE_KEY="$existing"
+      ok "Reusing the valid license already in $PWD/.env (no request needed)"
+      return 0
+    fi
+  fi
+
+  # 2. Self-serve, if an endpoint is configured and reachable.
+  if [ -n "$LICENSE_API_URL" ]; then
+    if endpoint_reachable; then
+      info "Provisioning your license..."
+      if [ ! -t 0 ] && [ -n "${GATEWAY_LICENSE_EMAIL:-}" ]; then
+        # Headless: provision once with the supplied email, no prompt.
+        provision_request "$GATEWAY_LICENSE_EMAIL"
+        [ "$PROV_CODE" = 200 ] && key="$(json_str "$PROV_BODY" license)"
+      elif [ -t 0 ]; then
+        key="$(self_serve)"
+      fi
+    else
+      info "Can't reach the Conduktor license service (no internet, or the network blocks it)."
+      info "If you have internet, check your connection and re-run for automatic setup."
+      info "Otherwise, request a free key from any device with internet:"
+    fi
+  fi
+
+  # 3. Manual fallback (today's behavior): paste a key from the website.
+  [ -n "$key" ] || key="$(manual_paste)"
+
+  [ -n "$key" ] || die "No license provided. Request one at $LICENSE_FORM_URL and re-run, or set GATEWAY_LICENSE_KEY=<key>."
+  validate_license "$key"
+
+  # Persist it. Write exactly ONE GATEWAY_LICENSE_KEY line: strip any existing (e.g.
+  # just-expired) one first so .env never ends up with duplicates.
+  local env_file="$PWD/.env"
+  if [ -f .env ] && grep -q '^GATEWAY_LICENSE_KEY=' .env; then
+    grep -v '^GATEWAY_LICENSE_KEY=' .env > .env.tmp 2>/dev/null || true
+    mv .env.tmp .env
+  fi
+  printf 'GATEWAY_LICENSE_KEY=%s\n' "$key" >> .env
+  # Make sure it actually landed before we tell the user it's saved.
+  grep -q '^GATEWAY_LICENSE_KEY=.' .env || die "Could not write the license to $env_file"
+  GATEWAY_LICENSE_KEY="$key"
+  ok "License provisioned and saved to $env_file"
+  info "Kept for next time: re-running reuses this file; delete it and the same email re-fetches the same license."
+}
+
+# In provisioning-only demo mode we only exercise the license flow, so we skip the
+# Docker prerequisites and the stack fetch entirely -- no Docker or compose file needed.
+if [ -z "${PROVISION_ONLY:-}" ]; then
+
 # --- 1. prerequisites --------------------------------------------------------
 step "1/5 Checking prerequisites"
 command -v docker >/dev/null 2>&1 || die "Docker is required. Install it: https://docs.docker.com/get-docker/"
@@ -87,23 +243,18 @@ else
   die "No compose file here and git is not installed. Install git, or run this from a cloned repo."
 fi
 
+fi  # end: skipped in PROVISION_ONLY mode
+
 # --- 3. license --------------------------------------------------------------
 step "3/5 Setting up your license"
-if [ -f .env ] && grep -q '^GATEWAY_LICENSE_KEY=.\+' .env; then
-  ok "Reusing the license already in .env"
-else
-  if [ -z "${GATEWAY_LICENSE_KEY:-}" ]; then
-    if [ -t 0 ]; then
-      printf "  Paste your Gateway Community Edition license key (free, request at https://conduktor.io/gateway/community-edition): "
-      read -r GATEWAY_LICENSE_KEY
-    else
-      die "No license found. Re-run with: GATEWAY_LICENSE_KEY=<key> bash <(curl -fsSL <url>)"
-    fi
-  fi
-  [ -n "${GATEWAY_LICENSE_KEY:-}" ] || die "License key was empty."
-  validate_license "$GATEWAY_LICENSE_KEY"
-  printf 'GATEWAY_LICENSE_KEY=%s\n' "$GATEWAY_LICENSE_KEY" >> .env
-  ok "License saved to .env"
+setup_license
+
+# Demo / testing hook: stop after the license is set up, before touching Docker.
+# Lets you showcase JUST the email -> license -> .env flow (e.g. against the mock API in
+# ./mock-license-api) without downloading images or starting the stack.
+if [ -n "${PROVISION_ONLY:-}" ]; then
+  ok "Provisioning-only mode: license ready, skipping Docker startup."
+  exit 0
 fi
 
 # --- 4. download images ------------------------------------------------------
