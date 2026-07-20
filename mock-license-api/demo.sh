@@ -7,6 +7,12 @@
 #
 # Usage:  ./mock-license-api/demo.sh              # online demo (self-serve flow)
 #         OFFLINE=1 ./mock-license-api/demo.sh    # air-gap demo (manual fallback flow)
+#         KEEP=1    ./mock-license-api/demo.sh    # persistent dir: shows reuse across runs
+#
+# KEEP=1 stores the demo's .env in /tmp/gateway-ce-demo instead of a throwaway dir, so
+# re-running shows the RE-RUN behaviors the one-shot demo can't: a second run reuses the
+# saved license (no API call), and deleting the .env then re-entering the same email
+# returns the SAME key (one active license per user). Reset with: rm -rf /tmp/gateway-ce-demo
 #
 # Why OFFLINE=1 exists: the mock runs on 127.0.0.1, and localhost is reachable even
 # with Wi-Fi off -- so turning off your internet does NOT trigger the offline branch
@@ -22,14 +28,20 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$HERE/.." && pwd)"
 URL="http://127.0.0.1:${PORT}/gateway/community-edition/license"
 
-WORKDIR="$(mktemp -d)"
+if [ -n "${KEEP:-}" ]; then
+  WORKDIR="/tmp/gateway-ce-demo"
+  mkdir -p "$WORKDIR"
+else
+  WORKDIR="$(mktemp -d)"
+fi
 SERVER_PID=""
 cleanup() {
   if [ -n "$SERVER_PID" ]; then
     kill "$SERVER_PID" 2>/dev/null || true
     wait "$SERVER_PID" 2>/dev/null || true   # reap it quietly (no "Terminated" notice)
   fi
-  rm -rf "$WORKDIR"
+  # Persistent mode keeps the dir (that's the point); one-shot mode cleans up.
+  [ -n "${KEEP:-}" ] || rm -rf "$WORKDIR"
 }
 trap cleanup EXIT
 
@@ -52,10 +64,18 @@ EOF
     echo "  License was stored here (this run's working dir):"
     echo "    $WORKDIR/.env"
     echo "    $(sed 's/\(GATEWAY_LICENSE_KEY=.\{16\}\).*/\1.../' "$WORKDIR/.env")"
-    echo "    (temp dir, removed on exit -- in a real install this is your project's .env)"
+    if [ -n "${KEEP:-}" ]; then
+      echo "    (persistent demo dir -- re-run with KEEP=1 to see it get REUSED)"
+    else
+      echo "    (temp dir, removed on exit -- in a real install this is your project's .env)"
+    fi
   fi
   echo
-  echo "> Done. Temp dir cleaned up."
+  if [ -n "${KEEP:-}" ]; then
+    echo "> Done. State kept in $WORKDIR (reset: rm -rf $WORKDIR)"
+  else
+    echo "> Done. Temp dir cleaned up."
+  fi
   exit 0
 fi
 
@@ -112,10 +132,20 @@ if [ -f "$WORKDIR/.env" ]; then
   echo "  License was stored here (this run's working dir):"
   echo "    $WORKDIR/.env"
   echo "    $(sed 's/\(GATEWAY_LICENSE_KEY=.\{16\}\).*/\1.../' "$WORKDIR/.env")"
-  echo "    (temp dir, removed on exit -- in a real install this is your project's .env)"
+  if [ -n "${KEEP:-}" ]; then
+    echo "    (persistent demo dir -- re-run with KEEP=1 to see it get REUSED)"
+  else
+    echo "    (temp dir, removed on exit -- in a real install this is your project's .env)"
+  fi
   echo
 fi
 echo "  Mock API log (every request/outcome):"
 grep "mock-api" "$WORKDIR/server.log" | sed 's/^/    /' || echo "    (no requests logged)"
 echo
-echo "> Done. Mock stopped, temp dir cleaned up."
+if [ -n "${KEEP:-}" ]; then
+  echo "> Done. Mock stopped. State kept in $WORKDIR (reset: rm -rf $WORKDIR)"
+  echo "  Re-run KEEP=1 $0 to see the license REUSED with no API call;"
+  echo "  or rm $WORKDIR/.env first to see the SAME key come back for the same email."
+else
+  echo "> Done. Mock stopped, temp dir cleaned up."
+fi
