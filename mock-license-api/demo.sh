@@ -105,7 +105,32 @@ fi
 sleep 0.3   # let the startup banner land in the log
 grep -m1 "Mode:" "$WORKDIR/server.log" || true
 
-cat <<EOF
+if [ -n "${KEEP:-}" ]; then
+  if [ -f "$WORKDIR/.env" ]; then
+    cat <<EOF
+
+  KEEP mode: persistent state in $WORKDIR
+  A license was saved by a previous run, so this run should REUSE it
+  (no prompt, no API call). To see "same key back" instead, exit and:
+    rm $WORKDIR/.env && KEEP=1 $0   -> same email returns the SAME key
+--------------------------------------------------------------------------
+EOF
+  else
+    cat <<EOF
+
+  KEEP mode: persistent state in $WORKDIR (no license saved yet, so this
+  run will PROVISION one and keep it for the next run).
+
+  Try it a few ways:
+    - a business email (e.g. you@conduktor.io)  -> gets a license
+    - a personal email (e.g. you@gmail.com)     -> rejected, re-prompts
+
+  Watch this same terminal after: the mock logs every outcome.
+--------------------------------------------------------------------------
+EOF
+  fi
+else
+  cat <<EOF
 
   Now running the install script as a brand-new user would see it.
   (fresh temp dir, no license yet, so it will PROVISION one)
@@ -115,11 +140,13 @@ cat <<EOF
     - a personal email (e.g. you@gmail.com)     -> rejected, re-prompts
     - press Ctrl+C to bail out
 
-  To see the offline/air-gap fallback instead:  OFFLINE=1 $0
+  Other modes:  OFFLINE=1 $0   (air-gap fallback)
+                KEEP=1 $0      (persistent state: reuse + same-key-back)
 
   Watch this same terminal after: the mock logs every outcome.
 --------------------------------------------------------------------------
 EOF
+fi
 
 # Run the REAL script in the fresh dir, interactively. PROVISION_ONLY stops it right
 # after the license is set up (no Docker), so this stays a quick license-flow demo.
