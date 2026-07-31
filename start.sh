@@ -9,6 +9,10 @@ set -euo pipefail
 trap 'rm -f "${UP_LOG:-}" "${PULL_LOG:-}" "${PULL_LOG:-}.code" 2>/dev/null || true' EXIT
 
 REPO_URL="https://github.com/conduktor/gateway-community-quickstart.git"
+SCRIPT_URL="https://releases.conduktor.io/gateway-community-quickstart"
+# The '#request-license' fragment opens the key-request form directly; without it
+# the form stays closed and there's no obvious way to reach it.
+LICENSE_URL="https://www.conduktor.io/gateway/community-edition#request-license"
 REPO_DIR="gateway-community-quickstart"
 GATEWAY_CONTAINER="conduktor-gateway"
 
@@ -51,14 +55,14 @@ validate_license() {
   local key="$1" payload exp now
   # A JWT is three non-empty base64url segments separated by dots.
   if ! printf '%s' "$key" | grep -Eq '^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$'; then
-    die "That doesn't look like a valid license key (expected a JWT). Request a free one at https://conduktor.io/gateway/community-edition"
+    die "That doesn't look like a valid license key (expected a JWT). Check that you copied the whole key — no line breaks or trailing spaces. Don't have one? Request a free key at $LICENSE_URL"
   fi
   # Best-effort expiry check: decode the payload (2nd segment) and read 'exp'.
   payload="$(b64url_decode "$(printf '%s' "$key" | cut -d. -f2)")"
   exp="$(printf '%s' "$payload" | grep -oE '"exp"[[:space:]]*:[[:space:]]*[0-9]+' | grep -oE '[0-9]+' | head -1 || true)"
   if [ -n "$exp" ]; then
     now="$(date +%s)"
-    [ "$exp" -gt "$now" ] || die "This license key has expired. Request a fresh one at https://conduktor.io/gateway/community-edition"
+    [ "$exp" -gt "$now" ] || die "This license key has expired. Request a fresh one at $LICENSE_URL"
   fi
 }
 
@@ -94,10 +98,14 @@ if [ -f .env ] && grep -q '^GATEWAY_LICENSE_KEY=.\+' .env; then
 else
   if [ -z "${GATEWAY_LICENSE_KEY:-}" ]; then
     if [ -t 0 ]; then
-      printf "  Paste your Gateway Community Edition license key (free, request at https://conduktor.io/gateway/community-edition): "
+      info "No key yet? Request a free one at:"
+      info "  $LICENSE_URL"
+      printf "  Paste your Gateway Community Edition license key: "
       read -r GATEWAY_LICENSE_KEY
     else
-      die "No license found. Re-run with: GATEWAY_LICENSE_KEY=<key> bash <(curl -fsSL <url>)"
+      die "No license found, and there's no terminal to prompt on. Re-run with:
+    GATEWAY_LICENSE_KEY=<key> bash <(curl -fsSL $SCRIPT_URL)
+  Don't have a key? Request a free one at $LICENSE_URL"
     fi
   fi
   [ -n "${GATEWAY_LICENSE_KEY:-}" ] || die "License key was empty."
